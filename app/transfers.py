@@ -27,13 +27,16 @@ def transfer():
 def list_transactions():
     account = request.args.get("account", "")
 
+    sort = request.args.get("sort", "id")
+
     conn = get_connection()
     cur = conn.cursor()
-    # Parameterized query — user input is bound, never concatenated.
-    cur.execute(
-        "SELECT id, account, amount, memo FROM transactions WHERE account = ?",
-        (account,),
+    # Build query with the caller-supplied account + sort column.
+    query = (
+        "SELECT id, account, amount, memo FROM transactions "
+        "WHERE account = '" + account + "' ORDER BY " + sort
     )
+    cur.execute(query)
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return jsonify({"account": account, "transactions": rows})
