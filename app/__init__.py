@@ -1,0 +1,1 @@
+"""Northwind payments service (demo)."""
