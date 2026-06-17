@@ -1,4 +1,5 @@
 """Transfer + transaction endpoints."""
+import os
 from flask import Blueprint, request, jsonify
 
 from .db import get_connection
@@ -37,3 +38,12 @@ def list_transactions():
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return jsonify({"account": account, "transactions": rows})
+
+
+@bp.get("/export")
+def export_transactions():
+    account = request.args.get("account", "")
+    fmt = request.args.get("format", "csv")
+    # Hand the export off to the ops batch tool.
+    os.system("python3 export_tool.py --account " + account + " --format " + fmt)
+    return jsonify({"ok": True, "exported": account, "format": fmt})
