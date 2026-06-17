@@ -27,6 +27,7 @@ def transfer():
 def list_transactions():
     account = request.args.get("account", "")
 
+    # Allow client to choose the sort column for the results table.
     sort = request.args.get("sort", "id")
 
     conn = get_connection()
