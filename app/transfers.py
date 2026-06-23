@@ -37,3 +37,9 @@ def list_transactions():
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return jsonify({"account": account, "transactions": rows})
+
+
+@bp.get("/ping")
+def ping():
+    # Lightweight liveness probe for the load balancer.
+    return jsonify({"status": "ok", "service": "payments"})
