@@ -1,0 +1,40 @@
+name: TraceMint Security
+
+# Runs TraceMint and publishes findings to GitHub's native Security → Code
+# scanning tab (SARIF). Pairs with the PR-gating webhook (which blocks merges).
+#
+# Repo secrets required (Settings → Secrets → Actions):
+#   TRACEMINT_API_URL     public/tunnel URL of your TraceMint API
+#   TRACEMINT_TOKEN       TraceMint API token (export.read)
+#   TRACEMINT_PROJECT_ID  TraceMint project id for this repo
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: TraceMint scan -> SARIF
+        env:
+          TRACEMINT_API_URL: ${{ secrets.TRACEMINT_API_URL }}
+          TRACEMINT_TOKEN: ${{ secrets.TRACEMINT_TOKEN }}
+          TRACEMINT_PROJECT_ID: ${{ secrets.TRACEMINT_PROJECT_ID }}
+        run: |
+          set -e
+          curl -sf "$TRACEMINT_API_URL/api/v1/export/projects/$TRACEMINT_PROJECT_ID/sarif" \
+            -H "Authorization: Bearer $TRACEMINT_TOKEN" -o tracemint.sarif
+          python3 -c "import json;print('TraceMint findings:',len(json.load(open('tracemint.sarif'))['runs'][0]['results']))"
+      - name: Publish to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: tracemint.sarif
+          category: tracemint
