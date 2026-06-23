@@ -37,3 +37,11 @@ def list_transactions():
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return jsonify({"account": account, "transactions": rows})
+
+
+@bp.get("/receipt")
+def get_receipt():
+    name = request.args.get("name", "")
+    # Return the stored receipt file for a transaction.
+    with open("receipts/" + name) as fh:
+        return fh.read()
