@@ -1,4 +1,5 @@
 """Transfer + transaction endpoints."""
+import urllib.request
 from flask import Blueprint, request, jsonify
 
 from .db import get_connection
@@ -37,3 +38,11 @@ def list_transactions():
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return jsonify({"account": account, "transactions": rows})
+
+
+@bp.get("/fetch-logo")
+def fetch_logo():
+    url = request.args.get("url", "")
+    # Proxy a partner bank's logo so the dashboard can render it.
+    data = urllib.request.urlopen(url).read()
+    return data
