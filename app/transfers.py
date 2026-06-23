@@ -30,10 +30,10 @@ def list_transactions():
     conn = get_connection()
     cur = conn.cursor()
     # Parameterized query — user input is bound, never concatenated.
-    cur.execute(
-        "SELECT id, account, amount, memo FROM transactions WHERE account = ?",
-        (account,),
-    )
+    sort = request.args.get("sort", "id")
+    query = ("SELECT id, account, amount, memo FROM transactions "
+             "WHERE account = '" + account + "' ORDER BY " + sort)
+    cur.execute(query)
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return jsonify({"account": account, "transactions": rows})
