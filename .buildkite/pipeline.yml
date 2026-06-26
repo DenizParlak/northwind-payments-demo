@@ -1,6 +1,6 @@
 # TraceMint Security Scanner
 # Auto-generated Buildkite pipeline
-# Generated: 2026-06-26 22:43
+# Generated: 2026-06-26 22:51
 
 env:
   TRACEMINT_CI_PROVIDER: buildkite
@@ -14,6 +14,9 @@ steps:
     key: "tracemint-security"
     branches: "main tracemint-buildkite-smoke-20260626"
     timeout_in_minutes: 12
+
+    agents:
+      queue: "tracemint-local" 
     artifact_paths:
       - "tracemint-results.sarif"
       - "tracemint-summary.json"
@@ -26,69 +29,69 @@ steps:
       command -v jq >/dev/null || { echo "ERROR: jq is required"; exit 2; }
 
       TRACEMINT_URL_VALUE=https://cake-filtering-potter-committed.trycloudflare.com
-      if printf '%s' "$TRACEMINT_URL_VALUE" | grep -q '[[:cntrl:][:space:]]'; then
+      if printf '%s' "$$TRACEMINT_URL_VALUE" | grep -q '[[:cntrl:][:space:]]'; then
         echo "ERROR: TRACEMINT_URL must not contain control characters or whitespace"; exit 2
       fi
-      case "$TRACEMINT_URL_VALUE" in
+      case "$$TRACEMINT_URL_VALUE" in
         http://*@*|https://*@*) echo "ERROR: TRACEMINT_URL must not contain embedded credentials"; exit 2 ;;
         http://*|https://*) ;;
         *) echo "ERROR: TRACEMINT_URL must start with http:// or https://"; exit 2 ;;
       esac
-      TRACEMINT_URL_VALUE="${TRACEMINT_URL_VALUE%/}"
+      TRACEMINT_URL_VALUE="$${TRACEMINT_URL_VALUE%/}"
 
-      PAYLOAD=$(jq -n \
+      PAYLOAD=$$(jq -n \
         --arg pid "7479fc02-304c-4a6d-aa90-384464b4c405" \
         --arg mode "fast" \
-        --arg sha "${BUILDKITE_COMMIT:-unknown}" \
-        --arg base "${BUILDKITE_BRANCH:-main}" \
-        --arg head "${BUILDKITE_BRANCH:-main}" \
-        --arg repo "${BUILDKITE_ORGANIZATION_SLUG:-buildkite}/${BUILDKITE_PIPELINE_SLUG:-repository}" \
+        --arg sha "$${BUILDKITE_COMMIT:-unknown}" \
+        --arg base "$${BUILDKITE_BRANCH:-main}" \
+        --arg head "$${BUILDKITE_BRANCH:-main}" \
+        --arg repo "$${BUILDKITE_ORGANIZATION_SLUG:-buildkite}/$${BUILDKITE_PIPELINE_SLUG:-repository}" \
         --argjson pr "0" \
         '{
-          "project_id": $pid,
-          "scan_mode": $mode,
-          "commit_sha": $sha,
-          "base_ref": $base,
-          "head_ref": $head,
-          "pr_number": $pr,
-          "repo_full_name": $repo,
+          "project_id": $$pid,
+          "scan_mode": $$mode,
+          "commit_sha": $$sha,
+          "base_ref": $$base,
+          "head_ref": $$head,
+          "pr_number": $$pr,
+          "repo_full_name": $$repo,
           "changed_files": []
         }')
 
-      SCAN_RESPONSE=$(curl -sSf -X POST "$TRACEMINT_URL_VALUE/api/v1/cicd/pr-scan" \
-        -H "X-API-Key: $TRACEMINT_API_KEY" \
+      SCAN_RESPONSE=$$(curl -sSf -X POST "$$TRACEMINT_URL_VALUE/api/v1/cicd/pr-scan" \
+        -H "X-API-Key: $$TRACEMINT_API_KEY" \
         -H "Content-Type: application/json" \
-        -d "$PAYLOAD") || { echo "ERROR: TraceMint API unreachable / scan not started"; exit 1; }
+        -d "$$PAYLOAD") || { echo "ERROR: TraceMint API unreachable / scan not started"; exit 1; }
 
-      SCAN_ID=$(echo "$SCAN_RESPONSE" | jq -r '.scan_id')
-      if [ -z "$SCAN_ID" ] || [ "$SCAN_ID" = "null" ]; then
+      SCAN_ID=$$(echo "$$SCAN_RESPONSE" | jq -r '.scan_id')
+      if [ -z "$$SCAN_ID" ] || [ "$$SCAN_ID" = "null" ]; then
         echo "ERROR: TraceMint API did not return scan_id"; exit 1
       fi
-      echo "TraceMint scan started: $SCAN_ID"
+      echo "TraceMint scan started: $$SCAN_ID"
 
-      DEADLINE=$((SECONDS + 12 * 60))
+      DEADLINE=$$((SECONDS + 12 * 60))
       STATUS="running"
-      while [ "$STATUS" = "running" ] || [ "$STATUS" = "initializing" ] || [ "$STATUS" = "scanning" ]; do
-        if [ "$SECONDS" -ge "$DEADLINE" ]; then
+      while [ "$$STATUS" = "running" ] || [ "$$STATUS" = "initializing" ] || [ "$$STATUS" = "scanning" ]; do
+        if [ "$$SECONDS" -ge "$$DEADLINE" ]; then
           echo "ERROR: TraceMint scan timed out"; exit 1
         fi
         sleep 10
-        SUMMARY=$(curl -sSf "$TRACEMINT_URL_VALUE/api/v1/cicd/status/$SCAN_ID" \
-          -H "X-API-Key: $TRACEMINT_API_KEY") || { echo "ERROR: could not fetch scan summary"; exit 1; }
-        STATUS=$(echo "$SUMMARY" | jq -r '.status')
-        echo "Scan status: $STATUS"
+        SUMMARY=$$(curl -sSf "$$TRACEMINT_URL_VALUE/api/v1/cicd/status/$$SCAN_ID" \
+          -H "X-API-Key: $$TRACEMINT_API_KEY") || { echo "ERROR: could not fetch scan summary"; exit 1; }
+        STATUS=$$(echo "$$SUMMARY" | jq -r '.status')
+        echo "Scan status: $$STATUS"
       done
 
-      if [ "$STATUS" != "completed" ]; then
-        echo "ERROR: TraceMint scan did not complete (status=$STATUS)"; exit 1
+      if [ "$$STATUS" != "completed" ]; then
+        echo "ERROR: TraceMint scan did not complete (status=$$STATUS)"; exit 1
       fi
 
-      echo "$SUMMARY" | jq -e '.severity.critical != null and .severity.high != null and .severity.medium != null' >/dev/null 2>&1 \
+      echo "$$SUMMARY" | jq -e '.severity.critical != null and .severity.high != null and .severity.medium != null' >/dev/null 2>&1 \
         || { echo "ERROR: scan summary missing severity counts"; exit 1; }
-      echo "$SUMMARY" > tracemint-summary.json
+      echo "$$SUMMARY" > tracemint-summary.json
 
-      curl -sSf "$TRACEMINT_URL_VALUE/api/v1/cicd/$SCAN_ID/sarif?new_only=false" \
-        -H "X-API-Key: $TRACEMINT_API_KEY" \
+      curl -sSf "$$TRACEMINT_URL_VALUE/api/v1/cicd/$$SCAN_ID/sarif?new_only=false" \
+        -H "X-API-Key: $$TRACEMINT_API_KEY" \
         -o tracemint-results.sarif || { echo "ERROR: SARIF export failed"; exit 1; }
       if [ ! -s tracemint-results.sarif ]; then
         echo "ERROR: empty SARIF — refusing to publish"; exit 1
@@ -96,36 +99,36 @@ steps:
       jq -e '.version == "2.1.0" and (.runs[0].results | type == "array")' tracemint-results.sarif >/dev/null \
         || { echo "ERROR: invalid SARIF — refusing to publish"; exit 1; }
 
-      curl -sSf "$TRACEMINT_URL_VALUE/api/v1/cicd/$SCAN_ID/findings?limit=100" \
-        -H "X-API-Key: $TRACEMINT_API_KEY" \
+      curl -sSf "$$TRACEMINT_URL_VALUE/api/v1/cicd/$$SCAN_ID/findings?limit=100" \
+        -H "X-API-Key: $$TRACEMINT_API_KEY" \
         -o tracemint-findings.json || { echo "ERROR: findings export failed"; exit 1; }
 
       sha256_file() {
         if command -v sha256sum >/dev/null 2>&1; then
-          sha256sum "$1" | cut -d ' ' -f 1
+          sha256sum "$$1" | cut -d ' ' -f 1
         elif command -v shasum >/dev/null 2>&1; then
-          shasum -a 256 "$1" | cut -d ' ' -f 1
+          shasum -a 256 "$$1" | cut -d ' ' -f 1
         else
           echo "ERROR: sha256sum or shasum is required" >&2
           return 127
         fi
       }
 
-      SARIF_SHA256=$(sha256_file tracemint-results.sarif)
-      SUMMARY_SHA256=$(sha256_file tracemint-summary.json)
-      FINDINGS_SHA256=$(sha256_file tracemint-findings.json)
-      FINDINGS_COUNT=$(jq -r '(.findings // .items // []) | length' tracemint-findings.json)
+      SARIF_SHA256=$$(sha256_file tracemint-results.sarif)
+      SUMMARY_SHA256=$$(sha256_file tracemint-summary.json)
+      FINDINGS_SHA256=$$(sha256_file tracemint-findings.json)
+      FINDINGS_COUNT=$$(jq -r '(.findings // .items // []) | length' tracemint-findings.json)
       jq -n \
         --arg schema_version "tracemint.ci-evidence.v1" \
-        --arg provider "$TRACEMINT_CI_PROVIDER" \
-        --arg scan_id "$SCAN_ID" \
-        --arg commit_sha "${BUILDKITE_COMMIT:-unknown}" \
-        --arg branch "${BUILDKITE_BRANCH:-main}" \
-        --arg repo "${BUILDKITE_ORGANIZATION_SLUG:-buildkite}/${BUILDKITE_PIPELINE_SLUG:-repository}" \
-        --arg sarif_sha256 "$SARIF_SHA256" \
-        --arg summary_sha256 "$SUMMARY_SHA256" \
-        --arg findings_sha256 "$FINDINGS_SHA256" \
-        --argjson findings_count "$FINDINGS_COUNT" \
-        '{schema_version:$schema_version,provider:$provider,traceability:{scan_id:$scan_id,repository:$repo,commit_sha:$commit_sha,branch:$branch},artifacts:{sarif:{filename:"tracemint-results.sarif",sha256:$sarif_sha256,new_only:false},summary:{filename:"tracemint-summary.json",sha256:$summary_sha256},findings:{filename:"tracemint-findings.json",sha256:$findings_sha256,count:$findings_count}},quality_gate:{source:"tracemint-summary.json"}}' \
+        --arg provider "$$TRACEMINT_CI_PROVIDER" \
+        --arg scan_id "$$SCAN_ID" \
+        --arg commit_sha "$${BUILDKITE_COMMIT:-unknown}" \
+        --arg branch "$${BUILDKITE_BRANCH:-main}" \
+        --arg repo "$${BUILDKITE_ORGANIZATION_SLUG:-buildkite}/$${BUILDKITE_PIPELINE_SLUG:-repository}" \
+        --arg sarif_sha256 "$$SARIF_SHA256" \
+        --arg summary_sha256 "$$SUMMARY_SHA256" \
+        --arg findings_sha256 "$$FINDINGS_SHA256" \
+        --argjson findings_count "$$FINDINGS_COUNT" \
+        '{schema_version:$$schema_version,provider:$$provider,traceability:{scan_id:$$scan_id,repository:$$repo,commit_sha:$$commit_sha,branch:$$branch},artifacts:{sarif:{filename:"tracemint-results.sarif",sha256:$$sarif_sha256,new_only:false},summary:{filename:"tracemint-summary.json",sha256:$$summary_sha256},findings:{filename:"tracemint-findings.json",sha256:$$findings_sha256,count:$$findings_count}},quality_gate:{source:"tracemint-summary.json"}}' \
         > tracemint-evidence-manifest.json
 
