@@ -1,0 +1,294 @@
+# TraceMint Security Scanner
+# Auto-generated workflow — do not edit manually
+# Generated: 2026-06-26 17:41
+
+name: TraceMint Security Scan
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+env:
+  TRACEMINT_URL: ${{ secrets.TRACEMINT_URL }}
+  TRACEMINT_PROJECT_ID: f4be661c-59dc-42e1-80bf-02fc004789dc
+
+jobs:
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write    # for SARIF upload
+      actions: read             # private repositories / upload-sarif metadata
+      pull-requests: write      # for PR comments
+      checks: write             # for check runs
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history for baseline diff
+
+      - name: Detect changed files
+        id: changes
+        if: github.event_name == 'pull_request'
+        run: |
+          FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.sha }} | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "changed_files=$FILES" >> $GITHUB_OUTPUT
+
+      - name: Run TraceMint Scan
+        id: scan
+        env:
+          TRACEMINT_API_KEY: ${{ secrets.TRACEMINT_API_KEY }}
+        run: |
+          if printf '%s' "$TRACEMINT_URL" | grep -q '[[:cntrl:][:space:]]'; then
+            echo "::error::TRACEMINT_URL must not contain control characters or whitespace"
+            exit 2
+          fi
+          case "$TRACEMINT_URL" in
+            http://*@*|https://*@*) echo "::error::TRACEMINT_URL must not contain embedded credentials"; exit 2 ;;
+            http://*|https://*) ;;
+            *) echo "::error::TRACEMINT_URL must start with http:// or https://"; exit 2 ;;
+          esac
+          TRACEMINT_URL="${TRACEMINT_URL%/}"
+
+          # Build changed files list
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            CHANGED='${{ steps.changes.outputs.changed_files }}'
+          else
+            CHANGED='[]'
+          fi
+          [ -z "$CHANGED" ] && CHANGED='[]'
+
+          # Call TraceMint API
+          RESPONSE=$(curl -sSf -X POST "$TRACEMINT_URL/api/v1/cicd/pr-scan" \
+            -H "X-API-Key: $TRACEMINT_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$(cat <<BODY
+          {
+            "project_id": "f4be661c-59dc-42e1-80bf-02fc004789dc",
+            "scan_mode": "balanced",
+            "commit_sha": "${{ github.sha }}",
+            "base_ref": "${{ github.event.pull_request.base.ref || 'main' }}",
+            "head_ref": "${{ github.head_ref || github.ref_name }}",
+            "pr_number": ${{ github.event.pull_request.number || 0 }},
+            "repo_full_name": "${{ github.repository }}",
+            "changed_files": $CHANGED
+          }
+          BODY
+          )") || true
+
+          if [ -z "$RESPONSE" ]; then
+            # FAIL CLOSED: a security gate that can't reach the scanner must not pass
+            # silently. Never write an empty SARIF here — uploading zero results would
+            # resolve every existing GitHub Code Scanning alert (false "all clear").
+            echo "::error::TraceMint API not reachable — failing the job (no scan = no security signal)"
+            exit 1
+          fi
+
+          SCAN_ID=$(echo "$RESPONSE" | jq -r '.scan_id')
+          echo "scan_id=$SCAN_ID" >> $GITHUB_OUTPUT
+          echo "TraceMint scan started: $SCAN_ID"
+
+          # Poll for completion (max 15 min)
+          for i in $(seq 1 180); do
+            STATUS=$(curl -sSf "$TRACEMINT_URL/api/v1/cicd/status/$SCAN_ID" \
+              -H "X-API-Key: $TRACEMINT_API_KEY" | jq -r '.status') || STATUS="error"
+            echo "  Poll $i: $STATUS"
+            if [ "$STATUS" = "completed" ] || [ "$STATUS" = "error" ]; then
+              break
+            fi
+            sleep 5
+          done
+
+          # A scan that errored or never completed has no trustworthy result set —
+          # fail rather than upload a partial/empty SARIF.
+          if [ "$STATUS" != "completed" ]; then
+            echo "::error::TraceMint scan did not complete (status=$STATUS)"
+            exit 1
+          fi
+
+          # Get SARIF (full current state). Fail loudly on export error and refuse to
+          # upload an empty SARIF (which would resolve existing Code Scanning alerts).
+          curl -sSf "$TRACEMINT_URL/api/v1/cicd/$SCAN_ID/sarif?new_only=false" \
+            -H "X-API-Key: $TRACEMINT_API_KEY" > tracemint-results.sarif || {
+              echo "::error::TraceMint SARIF export failed"; exit 1;
+            }
+          if [ ! -s tracemint-results.sarif ]; then
+            echo "::error::empty SARIF from TraceMint — refusing to upload"; exit 1
+          fi
+          echo "SARIF saved: $(wc -c < tracemint-results.sarif) bytes"
+
+          # Get CI/CD status summary — FAIL CLOSED. The scan already reached
+          # "completed" above, so a failed summary fetch is a transient/auth
+          # error, NOT "0 findings"; defaulting the gate to 0 would let a
+          # vulnerable PR through.
+          SUMMARY=$(curl -sSf "$TRACEMINT_URL/api/v1/cicd/status/$SCAN_ID" \
+            -H "X-API-Key: $TRACEMINT_API_KEY") || {
+              echo "::error::could not fetch scan summary — failing closed"; exit 1;
+            }
+          # The summary MUST carry severity counts; if it doesn't (schema drift,
+          # truncated body) fail rather than read missing keys as 0.
+          echo "$SUMMARY" | jq -e '.severity.critical != null and .severity.high != null and .severity.medium != null' >/dev/null 2>&1 || {
+            echo "::error::scan summary missing severity counts — failing closed"; exit 1;
+          }
+          echo "$SUMMARY" > tracemint-summary.json
+
+          # Set outputs (severity presence guaranteed by the guard above)
+          echo "critical_count=$(echo "$SUMMARY" | jq -r '.severity.critical')" >> $GITHUB_OUTPUT
+          echo "high_count=$(echo "$SUMMARY" | jq -r '.severity.high')" >> $GITHUB_OUTPUT
+          echo "medium_count=$(echo "$SUMMARY" | jq -r '.severity.medium')" >> $GITHUB_OUTPUT
+          echo "new_findings=$(echo "$SUMMARY" | jq -r '.new_findings // 0')" >> $GITHUB_OUTPUT
+          echo "total_findings=$(echo "$SUMMARY" | jq -r '.total_findings // 0')" >> $GITHUB_OUTPUT
+
+      - name: Upload SARIF
+        if: hashFiles('tracemint-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: tracemint-results.sarif
+          category: tracemint
+
+      - name: Record SARIF Upload Audit Receipt
+        if: hashFiles('tracemint-results.sarif') != ''
+        env:
+          TRACEMINT_API_KEY: ${{ secrets.TRACEMINT_API_KEY }}
+        run: |
+          set -euo pipefail
+          SCAN_ID="${{ steps.scan.outputs.scan_id }}"
+          GITHUB_API_URL="${GITHUB_API_URL:-https://api.github.com}"
+          FINDINGS_COUNT="$(jq -r '(.runs[0].results // []) | length' tracemint-results.sarif)"
+          UPLOAD_URL="${GITHUB_API_URL%/}/repos/${GITHUB_REPOSITORY}/code-scanning/sarifs"
+          jq -n \
+            --arg scan_id "$SCAN_ID" \
+            --arg repo_full_name "${{ github.repository }}" \
+            --arg commit_sha "${{ github.sha }}" \
+            --arg ref "${{ github.ref }}" \
+            --arg status "success" \
+            --arg upload_url "$UPLOAD_URL" \
+            --arg github_api_url "${GITHUB_API_URL%/}" \
+            --argjson findings_count "$FINDINGS_COUNT" \
+            '{scan_id:$scan_id,repo_full_name:$repo_full_name,commit_sha:$commit_sha,ref:$ref,status:$status,upload_url:$upload_url,github_api_url:$github_api_url,findings_count:$findings_count}' \
+            > tracemint-sarif-upload-receipt.json
+          curl -fsS -X POST "$TRACEMINT_URL/api/v1/cicd/sarif-upload/receipt" \
+            -H "X-API-Key: $TRACEMINT_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d @tracemint-sarif-upload-receipt.json \
+            >/dev/null || { echo "::error::TraceMint SARIF upload audit receipt failed"; exit 1; }
+
+      - name: Build TraceMint evidence manifest
+        if: hashFiles('tracemint-results.sarif') != ''
+        run: |
+          set -euo pipefail
+          SCAN_ID="${{ steps.scan.outputs.scan_id }}"
+          GITHUB_SERVER_URL="${GITHUB_SERVER_URL:-https://github.com}"
+          WORKFLOW_RUN_URL="${GITHUB_SERVER_URL%/}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          CODE_SCANNING_URL="${GITHUB_SERVER_URL%/}/${GITHUB_REPOSITORY}/security/code-scanning?query=tool%3ATraceMint"
+          FINDINGS_COUNT="$(jq -r '(.runs[0].results // []) | length' tracemint-results.sarif)"
+          TOTAL="$(jq -r '.total_findings // 0' tracemint-summary.json)"
+          NEW="$(jq -r '.new_findings // 0' tracemint-summary.json)"
+          CRITICAL="$(jq -r '.severity.critical // 0' tracemint-summary.json)"
+          HIGH="$(jq -r '.severity.high // 0' tracemint-summary.json)"
+          MEDIUM="$(jq -r '.severity.medium // 0' tracemint-summary.json)"
+          LOW="$(jq -r '.severity.low // 0' tracemint-summary.json)"
+          SARIF_SHA256="$(sha256sum tracemint-results.sarif | awk '{print $1}')"
+          SUMMARY_SHA256="$(sha256sum tracemint-summary.json | awk '{print $1}')"
+          RECEIPT_SHA256="$(sha256sum tracemint-sarif-upload-receipt.json | awk '{print $1}')"
+
+          jq -n \
+            --arg schema_version "tracemint.evidence-package.v1" \
+            --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg scan_id "$SCAN_ID" \
+            --arg repo_full_name "${{ github.repository }}" \
+            --arg commit_sha "${{ github.sha }}" \
+            --arg ref "${{ github.ref }}" \
+            --arg workflow_run_url "$WORKFLOW_RUN_URL" \
+            --arg check_run_url "$WORKFLOW_RUN_URL" \
+            --arg code_scanning_url "$CODE_SCANNING_URL" \
+            --arg sarif_sha256 "$SARIF_SHA256" \
+            --arg summary_sha256 "$SUMMARY_SHA256" \
+            --arg receipt_sha256 "$RECEIPT_SHA256" \
+            --argjson findings_count "$FINDINGS_COUNT" \
+            --argjson total_findings "$TOTAL" \
+            --argjson new_findings "$NEW" \
+            --argjson critical "$CRITICAL" \
+            --argjson high "$HIGH" \
+            --argjson medium "$MEDIUM" \
+            --argjson low "$LOW" \
+            '{schema_version:$schema_version,generated_at:$generated_at,traceability:{scan_id:$scan_id,repo_full_name:$repo_full_name,commit_sha:$commit_sha,ref:$ref,workflow_run_url:$workflow_run_url,check_run_url:$check_run_url},artifacts:{sarif:{filename:"tracemint-results.sarif",sha256:$sarif_sha256,result_count:$findings_count,new_only:false,include_code:true},summary:{filename:"tracemint-summary.json",sha256:$summary_sha256},receipt:{filename:"tracemint-sarif-upload-receipt.json",sha256:$receipt_sha256}},github:{code_scanning_url:$code_scanning_url,workflow_run_url:$workflow_run_url,check_run_url:$check_run_url},quality_gate:{total_findings:$total_findings,new_findings:$new_findings,severity:{critical:$critical,high:$high,medium:$medium,low:$low}},audit:{receipt_event:"cicd.sarif_upload_reported",receipt_file:"tracemint-sarif-upload-receipt.json"}}' \
+            > tracemint-evidence-manifest.json
+          jq -e '.traceability.commit_sha and .traceability.scan_id and .artifacts.sarif.sha256 and .github.code_scanning_url' tracemint-evidence-manifest.json >/dev/null \
+            || { echo "::error::TraceMint evidence manifest is incomplete"; exit 1; }
+
+      - name: Upload TraceMint evidence artifacts
+        if: hashFiles('tracemint-results.sarif') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: tracemint-security-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            tracemint-summary.json
+            tracemint-results.sarif
+            tracemint-sarif-upload-receipt.json
+            tracemint-evidence-manifest.json
+
+      - name: PR Comment
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const summary = JSON.parse(fs.readFileSync('tracemint-summary.json', 'utf8'));
+            const delta = summary.delta || {};
+            const newCount = delta.new || 0;
+            const fixedCount = delta.fixed || 0;
+
+            let body = `## TraceMint Security Scan\n\n`;
+            if (newCount === 0) {
+              body += `No new security findings detected.\n`;
+            } else {
+              body += `**${newCount} new finding(s)** detected in this PR.\n`;
+            }
+            if (fixedCount > 0) {
+              body += `${fixedCount} finding(s) **fixed** in this PR.\n`;
+            }
+            body += `\n[View full report](${process.env.TRACEMINT_URL}/scans/${summary.scan_id})`;
+
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.data.find(c => c.body.includes('TraceMint Security Scan'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body
+              });
+            }
+
+      - name: Quality Gate
+        if: always()
+        run: |
+          CRITICAL="${{ steps.scan.outputs.critical_count }}"
+          HIGH="${{ steps.scan.outputs.high_count }}"
+          MEDIUM="${{ steps.scan.outputs.medium_count }}"
+          NEW_FINDINGS="${{ steps.scan.outputs.new_findings }}"
+          CRITICAL=${CRITICAL:-0}
+          HIGH=${HIGH:-0}
+          MEDIUM=${MEDIUM:-0}
+          NEW_FINDINGS=${NEW_FINDINGS:-0}
+          if [ "$CRITICAL" -gt 0 ] 2>/dev/null || [ "$HIGH" -gt 0 ] 2>/dev/null; then
+            echo "::error::Security gate failed: $CRITICAL critical, $HIGH high, $MEDIUM medium, $NEW_FINDINGS new findings"
+            exit 1
+          fi
